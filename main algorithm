@@ -1,0 +1,179 @@
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <cmath>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_types.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/segmentation/conditional_euclidean_clustering.h>
+#include <boost/bind/bind.hpp>
+using namespace boost::placeholders;
+
+const float w_curv_cls1 = 1.2f;       
+const float w_curv_cls2 = 0.5f;         
+const float w_density = 0.8f;            
+const float w_context = 0.52f;           
+const float cluster_threshold = 12.0f;  
+
+const float cluster_tolerance = 0.025f;   
+const int min_cluster_size = 20;        
+const int max_cluster_size = 1000000;  
+
+struct PointFeature {
+    float curvature;
+    float density;
+    float context;
+};
+
+
+std::vector<PointFeature> features;
+
+
+float curvature_min = 1e10f, curvature_max = -1e10f;
+float density_min = 1e10f, density_max = -1e10f;
+float context_min = 1e10f, context_max = -1e10f;
+
+
+inline float normalize(float val, float min_val, float max_val) {
+    const float eps = 1e-6f;
+    return (val - min_val) / (max_val - min_val + eps);
+}
+
+
+inline float normalized_diff(float val1, float val2, float min_val, float max_val) {
+    return std::fabs(normalize(val1, min_val, max_val) - normalize(val2, min_val, max_val));
+}
+
+bool customCondition(const pcl::PointXYZI& p1, const pcl::PointXYZI& p2, float squared_distance, void* cookie) {
+    auto* pack = static_cast<std::pair<std::vector<int>*, std::vector<float>*>*>(cookie);
+    std::vector<int>& classes = *pack->first;
+    std::vector<float>& weights = *pack->second;
+
+    int idx1 = static_cast<int>(p1.intensity);
+    int idx2 = static_cast<int>(p2.intensity);
+
+    float wc = (classes[idx1] == 1) ? weights[0] : weights[1];
+    float wd = weights[2];
+    float wctx = weights[3];
+
+    //float c_norm = normalized_diff(features[idx1].curvature, features[idx2].curvature, curvature_min, curvature_max);
+    //float d_norm = normalized_diff(features[idx1].density, features[idx2].density, density_min, density_max);
+    //float ctx_norm = normalized_diff(features[idx1].context, features[idx2].context, context_min, context_max);
+
+    //float fused_distance = wc * c_norm + wd * d_norm + wctx * ctx_norm;
+
+    //std::cout << "Pair (" << idx1 << ", " << idx2 << "): "
+    //    << "c_norm=" << c_norm << ", "
+    //    << "d_norm=" << d_norm << ", "
+    //    << "ctx_norm=" << ctx_norm << ", "
+    //    << "fused_distance=" << fused_distance << std::endl;
+    //std::cout << "fused_distance=" << fused_distance << std::endl;
+
+    float c_diff = std::fabs(features[idx1].curvature - features[idx2].curvature);
+    float d_diff = std::fabs(features[idx1].density - features[idx2].density);
+    float ctx_diff = std::fabs(features[idx1].context - features[idx2].context);
+    float fused_distance = wc * c_diff + wd * d_diff + wctx * ctx_diff;
+
+    return fused_distance < cluster_threshold;
+}
+
+int main() {
+    std::string txt_path = ".txt";
+    std::ifstream infile(txt_path);
+    if (!infile.is_open()) {
+        std::cerr << "无法打开文件: " << txt_path << std::endl;
+        return -1;
+    }
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>());
+    std::vector<int> classes;
+    features.clear();
+
+    std::string line;
+    int idx = 0;
+    while (std::getline(infile, line)) {
+        if (line.empty()) continue;
+        std::istringstream iss(line);
+        float x, y, z, tmp, curvature, density, context;
+        int cls;
+
+        iss >> x >> y >> z >> cls;
+        for (int i = 0; i < 2; ++i) iss >> tmp;
+        iss >> curvature;
+        for (int i = 0; i < 2; ++i) iss >> tmp;
+        iss >> density;
+        for (int i = 0; i < 2; ++i) iss >> tmp;
+        iss >> context;
+
+        pcl::PointXYZI p;
+        p.x = x; p.y = y; p.z = z;
+        p.intensity = idx;
+        cloud->push_back(p);
+
+        classes.push_back(cls);
+        features.push_back({ curvature, density, context });
+        idx++;
+    }
+    infile.close();
+
+
+    for (const auto& f : features) {
+        if (f.curvature < curvature_min) curvature_min = f.curvature;
+        if (f.curvature > curvature_max) curvature_max = f.curvature;
+        if (f.density < density_min) density_min = f.density;
+        if (f.density > density_max) density_max = f.density;
+        if (f.context < context_min) context_min = f.context;
+        if (f.context > context_max) context_max = f.context;
+    }
+
+    pcl::ConditionalEuclideanClustering<pcl::PointXYZI> cec(true);
+    cec.setInputCloud(cloud);
+    cec.setClusterTolerance(cluster_tolerance);
+    cec.setMinClusterSize(min_cluster_size);
+    cec.setMaxClusterSize(max_cluster_size);
+
+    std::vector<float> weights = { w_curv_cls1, w_curv_cls2, w_density, w_context };
+    std::pair<std::vector<int>*, std::vector<float>*> cookie = { &classes, &weights };
+
+    cec.setConditionFunction(boost::bind(&customCondition, _1, _2, _3, &cookie));
+
+    std::vector<pcl::PointIndices> clusters;
+    cec.segment(clusters);
+
+    size_t clustered_points = 0;
+    for (const auto& c : clusters) clustered_points += c.indices.size();
+
+    std::cout << ": " << clustered_points << std::endl;
+    std::cout << ": " << clusters.size() << std::endl;
+
+ 
+    std::vector<uint8_t> colors;
+    for (int i = 0; i < 50; ++i) {
+        colors.push_back(rand() % 256);
+        colors.push_back(rand() % 256);
+        colors.push_back(rand() % 256);
+    }
+
+    pcl::visualization::PCLVisualizer::Ptr viewer(new pcl::visualization::PCLVisualizer("Conditional Clustering Viewer"));
+    viewer->setBackgroundColor(0, 0, 0);
+
+    for (size_t i = 0; i < clusters.size(); ++i) {
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cluster_cloud(new pcl::PointCloud<pcl::PointXYZI>());
+        for (int idx : clusters[i].indices) cluster_cloud->push_back(cloud->points[idx]);
+        pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZI> color_handler(
+            cluster_cloud,
+            colors[(i % 50) * 3], colors[(i % 50) * 3 + 1], colors[(i % 50) * 3 + 2]
+        );
+        viewer->addPointCloud<pcl::PointXYZI>(cluster_cloud, color_handler, "cluster_" + std::to_string(i));
+        viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "cluster_" + std::to_string(i));
+    }
+
+    while (!viewer->wasStopped()) {
+        viewer->spinOnce(100);
+    }
+
+    return 0;
+}
