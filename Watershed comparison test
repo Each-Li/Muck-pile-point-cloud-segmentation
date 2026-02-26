@@ -1,0 +1,84 @@
+import numpy as np
+import open3d as o3d
+from sklearn.neighbors import KDTree
+from skimage.segmentation import watershed
+from scipy import ndimage as ndi
+from skimage.feature import peak_local_max
+import matplotlib.pyplot as plt
+
+def load_txt_pointcloud(file_path):
+    data = np.loadtxt(file_path)
+    points = data[:, :3]   # xyz
+    colors = data[:, 3:6] / 255.0  # rgb 
+    return points, colors
+
+input_path = ".txt"
+points, colors = load_txt_pointcloud(input_path)
+
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(points)
+pcd.colors = o3d.utility.Vector3dVector(colors)
+
+
+kdt = KDTree(points)
+curvature = []
+k_neighbors = 50 
+
+for p in points:
+    dists, idx = kdt.query([p], k=k_neighbors)
+    neighbors = points[idx[0]]
+    cov = np.cov(neighbors.T)
+    eigvals = np.linalg.eigvalsh(cov)
+  
+    curv = eigvals[0] / (eigvals.sum() + 1e-12)
+    curvature.append(curv)
+
+curvature = np.array(curvature)
+
+
+x = points[:, 0]
+z = points[:, 2]
+grid_size = 30
+
+x_norm = ((x - x.min()) / (x.max() - x.min()) * (grid_size - 1)).astype(int)
+z_norm = ((z - z.min()) / (z.max() - z.min()) * (grid_size - 1)).astype(int)
+
+image = np.zeros((grid_size, grid_size))
+count = np.zeros((grid_size, grid_size))
+for xi, zi, c in zip(x_norm, z_norm, curvature):
+    image[zi, xi] += c
+    count[zi, xi] += 1
+
+image[count > 0] /= count[count > 0]
+
+
+distance = ndi.distance_transform_edt(image > 0)
+
+
+local_maxi_coords = peak_local_max(image, footprint=np.ones((3,3)), labels=image>0)
+
+local_maxi = np.zeros_like(image, dtype=bool)
+local_maxi[tuple(local_maxi_coords.T)] = True
+markers, _ = ndi.label(local_maxi)
+labels = watershed(-image, markers, mask=image > 0)
+
+point_labels = labels[z_norm, x_norm]
+
+max_label = point_labels.max()
+label_colors = np.random.rand(max_label + 1, 3)
+
+label_colors[0] = [0, 0, 0]
+
+seg_colors = label_colors[point_labels]
+
+vis = o3d.visualization.Visualizer()
+vis.create_window()
+vis.add_geometry(pcd)
+pcd.colors = o3d.utility.Vector3dVector(seg_colors)
+opt = vis.get_render_option()
+opt.background_color = np.asarray([0, 0, 0])  
+opt.point_size = 2.0  
+
+vis.run()
+vis.destroy_window()
+
