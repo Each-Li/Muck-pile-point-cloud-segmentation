@@ -1,0 +1,115 @@
+import numpy as np
+import pandas as pd
+
+def analyze_mean_curvature_distribution(
+    txt_file_path,
+    field="Mean_Curvature",
+    range_min=-522.5559,
+    range_max=489.5153,
+    num_bins_lvl1=20,
+    fine_min=-67.1239,
+    fine_max=84.6868,
+    num_bins_lvl2=20,
+    save_csv=True,
+    csv_output_path=".csv"
+):
+
+    field_names = [
+        "X", "Y", "Z","label",
+        "K1", "K2", "Mean_Curvature", "Gaussian_Curvature",
+        "Count_R0.02", "Count_R0.04", "Count_R0.06", "Count_R0.08"
+    ]
+
+
+    data = np.loadtxt(txt_file_path)
+    df = pd.DataFrame(data, columns=field_names)
+    col = df[field]
+
+
+    col_lvl1 = col[(col >= range_min) & (col <= range_max)]
+    bins_lvl1 = np.linspace(range_min, range_max, num_bins_lvl1 + 1)
+    counts_lvl1, edges_lvl1 = np.histogram(col_lvl1, bins=bins_lvl1)
+    total_lvl1 = len(col_lvl1)
+
+    print(f"\n📊 : {field} [{range_min}, {range_max}] {num_bins_lvl1} ")
+    for i in range(num_bins_lvl1):
+        left = edges_lvl1[i]
+        right = edges_lvl1[i+1]
+        count = counts_lvl1[i]
+        percent = count / total_lvl1 * 100 if total_lvl1 > 0 else 0
+        print(f"{left:.4f} - {right:.4f} : {count} 个点 ({percent:.2f}%)")
+
+    col_lvl2 = col[(col >= fine_min) & (col <= fine_max)]
+    bins_lvl2 = np.linspace(fine_min, fine_max, num_bins_lvl2 + 1)
+    counts_lvl2, edges_lvl2 = np.histogram(col_lvl2, bins=bins_lvl2)
+    total_lvl2 = len(col_lvl2)
+
+    print(f"\n🔍 : {field} [{fine_min}, {fine_max}]  {num_bins_lvl2} ")
+    bin_labels = []
+    percentages = []
+
+    for i in range(num_bins_lvl2):
+        left = edges_lvl2[i]
+        right = edges_lvl2[i+1]
+        count = counts_lvl2[i]
+        percent = count / total_lvl2 * 100 if total_lvl2 > 0 else 0
+        bin_labels.append(f"{left:.4f} - {right:.4f}")
+        percentages.append(percent)
+        print(f"{left:.4f} - {right:.4f} : {count}  ({percent:.2f}%)")
+
+
+    if save_csv:
+        out_df = pd.DataFrame({
+            "": bin_labels,
+            "": counts_lvl2,
+            "": [f"{p:.2f}%" for p in percentages]
+        })
+        out_df.to_csv(csv_output_path, index=False, encoding='utf-8-sig')
+        print(f"\n✅ ：{csv_output_path}")
+        first_3_vals = col.iloc[:3].values
+        mean_first_3 = np.mean(first_3_vals)
+        print("\n📌 :")
+        for i, val in enumerate(first_3_vals, 1):
+            print(f"{i}: {val:.6f}")
+        print(f": {mean_first_3:.6f}")
+
+
+def filter_mean_curvature_by_range(
+    input_txt_path,
+    save_keep_path,
+    save_removed_path,
+    field_name="Mean_Curvature",
+    min_value=-67.0,
+    max_value=84.0
+):
+  
+    field_names = [
+        "X", "Y", "Z", "label", "K1", "K2", "Mean_Curvature", "Gaussian_Curvature",
+        "Count_R0.02", "Count_R0.04", "Count_R0.06", "Count_R0.08"
+    ]
+
+
+    data = np.loadtxt(input_txt_path)
+    df = pd.DataFrame(data, columns=field_names)
+
+
+    keep_mask = (df[field_name] >= min_value) & (df[field_name] <= max_value)
+    df_keep = df[keep_mask]
+    df_removed = df[~keep_mask]
+
+    df_keep.to_csv(save_keep_path, sep=' ', index=False, header=False, float_format="%.6f")
+    df_removed.to_csv(save_removed_path, sep=' ', index=False, header=False, float_format="%.6f")
+
+if __name__ == "__main__":
+    analyze_mean_curvature_distribution(
+        txt_file_path=".txt",
+        save_csv=True
+    )
+
+    filter_mean_curvature_by_range(
+        input_txt_path=".txt",
+        save_keep_path=".txt",
+        save_removed_path=".txt",
+        min_value=-34,
+        max_value=64
+    )
