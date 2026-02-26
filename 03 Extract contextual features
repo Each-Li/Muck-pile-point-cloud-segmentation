@@ -1,0 +1,120 @@
+import numpy as np
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+from scipy.spatial import cKDTree
+import os
+
+
+class SCFModule(nn.Module):
+    def __init__(self, k=64, in_dim=3, local_dim=1):
+        super().__init__()
+        self.k = k
+        self.mlp = nn.Sequential(
+            nn.Conv2d(in_dim, 32, 1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, local_dim, 1),
+            nn.BatchNorm2d(local_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, x, points):
+        """
+        x: [B, C, N]XZXZxz
+        points: [B, 3, N]
+        """
+        B, _, N = x.shape
+        device = x.device
+
+        neighbor_feats_list = []
+        for b in range(B):
+            pts = points[b].transpose(0, 1).cpu().numpy()  # [N, 3]
+            kdtree = cKDTree(pts)
+            _, idx = kdtree.query(pts, k=self.k)  # [N, k]
+
+            idx_torch = torch.from_numpy(idx).long().to(device)  # [N, k]
+            x_b = x[b]  # [C, N]
+            x_b_expand = x_b.unsqueeze(2).expand(-1, -1, self.k)  # [C, N, k]
+
+            neighbor_feats = torch.gather(
+                x_b.unsqueeze(2).expand(-1, -1, self.k),
+                1,
+                idx_torch.unsqueeze(0).expand(x_b.shape[0], -1, -1)
+            )  # [C, N, k]
+
+            neighbor_feats_list.append(neighbor_feats.unsqueeze(0))
+
+        neighbor_feats = torch.cat(neighbor_feats_list, dim=0)  # [B, C, N, k]
+        center_feats = x.unsqueeze(3)  # [B, C, N, 1]
+        delta_feats = neighbor_feats - center_feats  # [B, C, N, k]
+
+        out = torch.max(self.mlp(delta_feats), dim=3)[0]  # [B, C_out, N]
+        return out
+
+
+
+def load_full_data(file_path):
+    data = np.loadtxt(file_path, comments="#")
+    xyz = data[:, :3]
+    return xyz, data
+
+def normalize_points(points):
+    centroid = np.mean(points, axis=0)
+    points -= centroid
+    return points
+
+
+def process_with_overlap(points, block_size=50000, overlap=1000, k=64):
+    scf = SCFModule(k=k, in_dim=3, local_dim=1).cuda()
+    scf.eval()
+
+    num_points = len(points)
+    features = np.zeros((num_points, 1), dtype=np.float32)
+
+    for i in tqdm(range(0, num_points, block_size - overlap)):
+        start = max(0, i - overlap) if i != 0 else i
+        end = min(i + block_size, num_points)
+
+        block_points = points[start:end]
+        valid_start = 0 if i == 0 else overlap
+        valid_end = block_size if end == num_points else (block_size - overlap)
+        valid_end = min(valid_end, end - start)
+
+        points_tensor = torch.FloatTensor(block_points).cuda().permute(1, 0).unsqueeze(0)
+
+        with torch.no_grad():
+            block_features = scf(points_tensor, points_tensor)
+
+        global_start = i if i == 0 else i + overlap // 2
+        global_end = global_start + (valid_end - valid_start)
+
+        block_valid = block_features[0, :, valid_start:valid_end].cpu().numpy().T
+        valid_len = block_valid.shape[0]
+        global_len = features.shape[0] - global_start
+        copy_len = min(valid_len, global_len)
+
+        features[global_start:global_start + copy_len] = block_valid[:copy_len]
+
+    return features
+
+
+if __name__ == "__main__":
+    input_path = ".txt"
+    output_path = ".txt"
+
+    xyz, full_data = load_full_data(input_path)
+    xyz_norm = normalize_points(xyz.copy())
+
+    scf_features = process_with_overlap(xyz_norm, block_size=50000, overlap=2000, k=64)
+
+    combined_data = np.hstack([full_data, scf_features])  # [N, +D]
+
+    header = (
+        "X Y Z label K1 K2 Mean_Curvature Gaussian_Curvature Count_R0.02 "
+        "Count_R0.04 Count_R0.06 Count_R0.08 " +
+        " ".join([f"SCF_{i}" for i in range(scf_features.shape[1])])
+    )
+
+    np.savetxt(output_path, combined_data, fmt="%.6f", header=header, comments='')
+
