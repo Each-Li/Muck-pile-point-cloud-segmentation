@@ -1,0 +1,91 @@
+import numpy as np
+from sklearn.neighbors import KDTree
+from scipy.linalg import lstsq
+
+def load_point_cloud_from_txt(file_path, has_class=True):
+    data = np.loadtxt(file_path)
+    points = data[:, :3]  
+    classes = data[:, 3] if has_class else None
+    return points, classes
+
+def compute_principal_curvatures(points, k_neighbors=30):
+    tree = KDTree(points)
+    k1_list, k2_list = [], []
+
+    for i in range(len(points)):
+        _, idx = tree.query([points[i]], k=k_neighbors)
+        neighbors = points[idx[0]]
+        centroid = np.mean(neighbors, axis=0)
+        centered = neighbors - centroid
+
+        x, y, z = centered[:, 0], centered[:, 1], centered[:, 2]
+        A = np.column_stack([x**2, x*y, y**2, x, y])
+        coeffs, _, _, _ = lstsq(A, z)
+
+        a, b, c, d, e = coeffs
+        E = 1 + d**2
+        F = d * e
+        G = 1 + e**2
+        L = 2 * a / np.sqrt(1 + d**2 + e**2)
+        M = b / np.sqrt(1 + d**2 + e**2)
+        N = 2 * c / np.sqrt(1 + d**2 + e**2)
+
+        denominator = E * G - F**2
+        if denominator == 0:
+            k1, k2 = 0.0, 0.0
+        else:
+            trace = (E * N + G * L - 2 * F * M) / denominator
+            det = (L * N - M**2) / denominator
+            discriminant = np.sqrt(max(trace**2 - 4 * det, 0))
+            k1 = (trace + discriminant) / 2
+            k2 = (trace - discriminant) / 2
+
+        k1_list.append(k1)
+        k2_list.append(k2)
+
+    k1 = np.array(k1_list)
+    k2 = np.array(k2_list)
+    mean_curvature = (k1 + k2) / 2
+    gaussian_curvature = k1 * k2
+    return np.column_stack([k1, k2, mean_curvature, gaussian_curvature])
+
+def compute_neighbor_counts(points, radii=[0.002, 0.004, 0.006, 0.008]):
+    tree = KDTree(points)
+    counts_list = []
+    for r in radii:
+        counts = tree.query_radius(points, r=r, count_only=True)
+        counts_list.append(counts)
+    return np.column_stack(counts_list)
+
+def main():
+
+    file_path = ".txt"
+    has_class = True  
+
+ 
+    points, classes = load_point_cloud_from_txt(file_path, has_class=has_class)
+    print(f"Loaded {len(points)} points.")
+
+
+    curvatures = compute_principal_curvatures(points)
+    print("Principal curvatures computed.")
+
+  
+    neighbor_counts = compute_neighbor_counts(points)
+    print("Neighbor counts computed.")
+
+ 
+    if classes is not None:
+        output = np.hstack([points, classes.reshape(-1, 1), curvatures, neighbor_counts])
+        header = "X Y Z Class K1 K2 Mean_Curvature Gaussian_Curvature Count_R0.02 Count_R0.04 Count_R0.06 Count_R0.08"
+    else:
+        output = np.hstack([points, curvatures, neighbor_counts])
+        header = "X Y Z K1 K2 Mean_Curvature Gaussian_Curvature Count_R0.02 Count_R0.04 Count_R0.06 Count_R0.08"
+
+    output_path = ".txt"
+    np.savetxt(output_path, output, header=header, fmt="%.6f")
+    print(f"\n✅ Results saved to '{output_path}'.")
+
+if __name__ == "__main__":
+    main()
+
